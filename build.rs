@@ -16,9 +16,15 @@ fn main() {
 
     build_common(&mut builder);
     ffmpeg::build_ffmpeg(&mut builder);
+    let hostenc = hostenc::build_hostenc(&mut builder);
     #[cfg(all(windows, feature = "vram"))]
     sdk::build_sdk(&mut builder);
     builder.static_crt(true).compile("hwcodec");
+    // After "hwcodec": static libraries are linked in this order and hwcodec
+    // refers to hostenc.
+    if let Some(mut hostenc) = hostenc {
+        hostenc.static_crt(true).compile("hostenc");
+    }
 }
 
 fn build_common(builder: &mut Build) {
@@ -280,6 +286,36 @@ mod ffmpeg {
             .unwrap();
 
         builder.files(["mux.cpp"].map(|f| mux_dir.join(f)));
+    }
+}
+
+// "h264_hostenc" / "hevc_hostenc": RAM encoders that send the frames to a
+// hostencd service, see cpp/hostenc/README.md. Windows and Linux only.
+mod hostenc {
+    use super::*;
+
+    pub fn build_hostenc(builder: &mut Build) -> Option<Build> {
+        let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
+        if target_os != "windows" && target_os != "linux" {
+            return None;
+        }
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let hostenc_dir = manifest_dir.join("cpp").join("hostenc");
+
+        // The glue is C++ and belongs to the hwcodec library.
+        builder.define("HWCODEC_HOSTENC", None);
+        builder.include(&hostenc_dir);
+        builder.file(hostenc_dir.join("hostenc_ram.cpp"));
+
+        if target_os == "windows" {
+            println!("cargo:rustc-link-lib=ws2_32");
+        }
+
+        // libhostenc is plain C. It gets its own builder so that it is
+        // compiled as C and never sees the C++ flags of the main builder.
+        let mut c = Build::new();
+        c.include(&hostenc_dir).file(hostenc_dir.join("hostenc.c"));
+        Some(c)
     }
 }
 

@@ -40,6 +40,10 @@ Based on the information above, there are several optimizations and changes made
 * remove hevc_vaapi because of possible poor quality
 * amf: not tested, https://github.com/GPUOpen-LibrariesAndSDKs/AMF/issues/378
 
+### Encoding service (Windows, Linux)
+
+`h264_hostenc` and `hevc_hostenc` send the frames to a `hostencd` service on another machine instead of encoding locally, for virtual machines without a hardware encoder. They are only offered if the client configuration file exists. See [cpp/hostenc/README.md](cpp/hostenc/README.md).
+
 ### MacOS
 
 | FFmpeg ram encode   | FFmpeg ram decode   |

@@ -20,6 +20,9 @@ extern "C" {
 #ifdef _WIN32
 #include "win.h"
 #endif
+#ifdef HWCODEC_HOSTENC
+#include "hostenc_ram.h"
+#endif
 
 static int calculate_offset_length(int pix_fmt, int height, const int *linesize,
                                    int *offset, int *length) {
@@ -122,6 +125,13 @@ public:
   AVBufferRef *hw_device_ctx_ = NULL;
   AVFrame *hw_frame_ = NULL;
 
+#ifdef HWCODEC_HOSTENC
+  // Set for "h264_hostenc" / "hevc_hostenc": the frames go to a hostencd
+  // service instead of libavcodec, see cpp/hostenc.
+  hostenc_ram::Session *hostenc_ = NULL;
+  int hostenc_linesize_[2] = {0, 0};
+#endif
+
   FFmpegRamEncoder(const char *name, const char *mc_name, int width, int height,
                    int pixfmt, int align, int fps, int gop, int rc, int quality,
                    int kbs, int q, int thread_count, int gpu,
@@ -158,6 +168,11 @@ public:
     const AVCodec *codec = NULL;
 
     int ret;
+
+#ifdef HWCODEC_HOSTENC
+    if (hostenc_ram::is_hostenc_name(name_))
+      return init_hostenc(linesize, offset, length);
+#endif
 
     if (!(codec = avcodec_find_encoder_by_name(name_.c_str()))) {
       LOG_ERROR(std::string("Codec ") + name_ + " not found");
@@ -270,6 +285,11 @@ public:
   int encode(const uint8_t *data, int length, const void *obj, uint64_t ms) {
     int ret;
 
+#ifdef HWCODEC_HOSTENC
+    if (hostenc_)
+      return encode_hostenc(data, length, obj, (int64_t)ms);
+#endif
+
     if ((ret = av_frame_make_writable(frame_)) != 0) {
       LOG_ERROR(std::string("av_frame_make_writable failed, ret = ") + av_err2str(ret));
       return ret;
@@ -291,6 +311,12 @@ public:
   }
 
   void free_encoder() {
+#ifdef HWCODEC_HOSTENC
+    if (hostenc_) {
+      delete hostenc_;
+      hostenc_ = NULL;
+    }
+#endif
     if (pkt_)
       av_packet_free(&pkt_);
     if (frame_)
@@ -304,10 +330,66 @@ public:
   }
 
   int set_bitrate(int kbs) {
+#ifdef HWCODEC_HOSTENC
+    if (hostenc_)
+      return hostenc_->set_bitrate(kbs);
+#endif
     return util_encode::change_bit_rate(c_, name_, kbs) ? 0 : -1;
   }
 
 private:
+#ifdef HWCODEC_HOSTENC
+  bool init_hostenc(int *linesize, int *offset, int *length) {
+    int ls[AV_NUM_DATA_POINTERS] = {0};
+
+    if (pixfmt_ != AV_PIX_FMT_NV12) {
+      LOG_ERROR(name_ + " needs NV12 input");
+      return false;
+    }
+    // Same buffer layout as for every other RAM encoder: the caller fills
+    // one buffer with the line sizes and plane offsets reported here.
+    if (ffmpeg_ram_get_linesize_offset_length(pixfmt_, width_, height_, align_,
+                                              ls, offset_, length) != 0)
+      return false;
+    hostenc_linesize_[0] = ls[0];
+    hostenc_linesize_[1] = ls[1];
+    hostenc_ = hostenc_ram::Session::open(name_, width_, height_, fps_, gop_,
+                                          rc_, kbs_, q_);
+    if (!hostenc_)
+      return false;
+    for (int i = 0; i < AV_NUM_DATA_POINTERS; i++) {
+      linesize[i] = ls[i];
+      offset[i] = offset_[i];
+    }
+    return true;
+  }
+
+  int encode_hostenc(const uint8_t *data, int length, const void *obj,
+                     int64_t ms) {
+    const uint8_t *out = NULL;
+    int size = 0;
+    int key = 0;
+    int ret;
+
+    // Same check as fill_frame() for NV12.
+    if (length <
+        height_ * (hostenc_linesize_[0] + hostenc_linesize_[1] / 2)) {
+      LOG_ERROR(std::string("encode_hostenc: NV12 data length error. data_length:") +
+                std::to_string(length) +
+                ", linesize[0]:" + std::to_string(hostenc_linesize_[0]) +
+                ", linesize[1]:" + std::to_string(hostenc_linesize_[1]));
+      return -1;
+    }
+    if ((ret = hostenc_->encode(data, hostenc_linesize_[0], data + offset_[0],
+                                hostenc_linesize_[1], ms, &out, &size,
+                                &key)) != 0)
+      return ret;
+    // Exactly one packet per frame, pts as passed in.
+    callback_(out, size, ms, key, obj);
+    return 0;
+  }
+#endif
+
   int set_hwframe_ctx() {
     AVBufferRef *hw_frames_ref;
     AVHWFramesContext *frames_ctx = NULL;

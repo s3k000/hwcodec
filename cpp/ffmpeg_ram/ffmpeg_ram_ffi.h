@@ -30,5 +30,8 @@ int ffmpeg_ram_get_linesize_offset_length(int pix_fmt, int width, int height,
                                           int align, int *linesize, int *offset,
                                           int *length);
 int ffmpeg_ram_set_bitrate(void *encoder, int kbs);
+// Only defined on Windows and Linux (cpp/hostenc/hostenc_ram.cpp): 1 if the
+// hostenc client configuration is present and usable, see cpp/hostenc.
+int hostenc_ram_available(void);
 
 #endif // FFMPEG_RAM_FFI_H

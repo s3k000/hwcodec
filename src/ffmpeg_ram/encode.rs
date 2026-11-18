@@ -261,6 +261,20 @@ impl Encoder {
                 //     ..Default::default()
                 // });
             }
+            // Encoding service on another machine (cpp/hostenc). Offered only
+            // if its client configuration exists, independent of the GPU
+            // vendors above, and after them: only the first candidate that
+            // passes the test below is kept for each format.
+            if unsafe { crate::ffmpeg_ram::hostenc_ram_available() } != 0 {
+                for (name, format) in [("h264_hostenc", H264), ("hevc_hostenc", H265)] {
+                    codecs.push(CodecInfo {
+                        name: name.to_owned(),
+                        format,
+                        priority: Priority::Normal as _,
+                        ..Default::default()
+                    });
+                }
+            }
         }
 
         #[cfg(target_os = "macos")]
@@ -285,10 +299,12 @@ impl Encoder {
             }
         }
 
-        // qsv doesn't support yuv420p
+        // qsv and hostenc don't support yuv420p
         codecs.retain(|c| {
             let ctx = ctx.clone();
-            if ctx.pixfmt == AVPixelFormat::AV_PIX_FMT_YUV420P && c.name.contains("qsv") {
+            if ctx.pixfmt == AVPixelFormat::AV_PIX_FMT_YUV420P
+                && (c.name.contains("qsv") || c.name.contains("hostenc"))
+            {
                 return false;
             }
             return true;
