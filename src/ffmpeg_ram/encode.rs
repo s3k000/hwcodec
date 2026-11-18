@@ -21,6 +21,12 @@ use super::Priority;
 #[cfg(any(windows, target_os = "linux"))]
 use crate::common::Driver;
 
+/// How long `available_encoders()` waits for the hostenc service, and how
+/// often it retries. Must stay well below the time the caller gives the whole
+/// test (RustDesk kills its check process after 30 s).
+const HOSTENC_TEST_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+const HOSTENC_TEST_RETRY: std::time::Duration = std::time::Duration::from_millis(500);
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct EncodeContext {
     pub name: String,
@@ -311,6 +317,7 @@ impl Encoder {
         });
 
         let mut res = vec![];
+        let mut hostenc_deadline: Option<std::time::Instant> = None;
 
         if let Ok(yuv) = Encoder::dummy_yuv(ctx.clone()) {
             for codec in codecs {
@@ -330,7 +337,26 @@ impl Encoder {
                     ..ctx
                 };
 
-                match Encoder::new(c) {
+                // The hostenc service is reached over the network, and this
+                // test can run before the network is usable: at system start
+                // Windows still probes a static address for about 3 s after
+                // the link is up, and connect() fails with WSAEHOSTUNREACH.
+                // The result of this test is kept for the lifetime of the
+                // server process, so wait a bounded time for the service
+                // instead of losing the encoder until the next restart. The
+                // deadline is shared by all hostenc candidates.
+                let mut created = Encoder::new(c.clone());
+                if codec.name.contains("hostenc") {
+                    let deadline = *hostenc_deadline.get_or_insert_with(|| {
+                        std::time::Instant::now() + HOSTENC_TEST_WAIT
+                    });
+                    while created.is_err() && std::time::Instant::now() < deadline {
+                        std::thread::sleep(HOSTENC_TEST_RETRY);
+                        created = Encoder::new(c.clone());
+                    }
+                }
+
+                match created {
                     Ok(mut encoder) => {
                         debug!("Encoder {} created successfully", codec.name);
                         let mut passed = false;
